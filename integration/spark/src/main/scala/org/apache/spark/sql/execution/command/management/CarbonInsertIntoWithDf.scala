@@ -24,12 +24,12 @@ import scala.collection.JavaConverters._
 import org.apache.spark.sql.{AnalysisException, DataFrame, Row, SparkSession}
 import org.apache.spark.sql.execution.command.UpdateTableModel
 import org.apache.spark.util.CausedBy
-
 import org.apache.carbondata.common.logging.LogServiceFactory
 import org.apache.carbondata.core.datastore.impl.FileFactory
 import org.apache.carbondata.core.metadata.schema.table.TableInfo
 import org.apache.carbondata.core.statusmanager.{LoadMetadataDetails, SegmentStatus, SegmentStatusManager}
-import org.apache.carbondata.core.util.{CarbonProperties, ThreadLocalSessionInfo}
+import org.apache.carbondata.core.util.ObjectSerializationUtil.convertStringToObject
+import org.apache.carbondata.core.util.{CarbonProperties, ObjectSerializationUtil, ThreadLocalSessionInfo}
 import org.apache.carbondata.core.util.path.CarbonTablePath
 import org.apache.carbondata.events.OperationContext
 import org.apache.carbondata.events.exception.PreEventException
@@ -154,9 +154,6 @@ case class CarbonInsertIntoWithDf(databaseNameOp: Option[String],
 
       LOGGER.info("Sort Scope : " + carbonLoadModel.getSortScope)
       val (rows, loadResult) = insertData(loadParams)
-      if (updateModel.isDefined) {
-        updateModel.get.insertedSegment = Some(carbonLoadModel.getSegmentId)
-      }
       val info = CommonLoadUtils.makeAuditInfo(loadResult)
       CommonLoadUtils.firePostLoadEvents(sparkSession,
         carbonLoadModel,

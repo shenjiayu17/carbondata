@@ -532,7 +532,7 @@ class MVIncrementalLoadingTestcase extends QueryTest with BeforeAndAfterAll {
       CarbonCommonConstants.DATABASE_DEFAULT_NAME,
       "mv1")
     val loadMetadataDetails = SegmentStatusManager.readLoadMetadata(viewTable.getMetadataPath)
-    assert(loadMetadataDetails.length == 1)
+    assert(loadMetadataDetails.length == 2)
     assert(loadMetadataDetails(0).getSegmentStatus == SegmentStatus.MARKED_FOR_DELETE)
   }
 

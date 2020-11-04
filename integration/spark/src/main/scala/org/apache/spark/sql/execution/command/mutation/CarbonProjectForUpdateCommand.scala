@@ -34,7 +34,6 @@ import org.apache.carbondata.common.logging.LogServiceFactory
 import org.apache.carbondata.core.constants.CarbonCommonConstants
 import org.apache.carbondata.core.exception.ConcurrentOperationException
 import org.apache.carbondata.core.features.TableOperation
-import org.apache.carbondata.core.index.Segment
 import org.apache.carbondata.core.locks.{CarbonLockFactory, CarbonLockUtil, LockUsage}
 import org.apache.carbondata.core.mutate.CarbonUpdateUtil
 import org.apache.carbondata.core.statusmanager.{SegmentStatus, SegmentStatusManager}
@@ -60,14 +59,14 @@ private[sql] case class CarbonProjectForUpdateCommand(
     val LOGGER = LogServiceFactory.getLogService(this.getClass.getName)
     var updatedRowCount = 0L
     IUDCommonUtil.checkIfSegmentListIsSet(sparkSession, plan)
-    val res = plan find {
+    val logicPlan = plan find {
       case relation: LogicalRelation if relation.relation
         .isInstanceOf[CarbonDatasourceHadoopRelation] =>
         true
       case _ => false
     }
 
-    if (res.isEmpty) {
+    if (logicPlan.isEmpty) {
       return Array(Row(updatedRowCount)).toSeq
     }
     val carbonTable = CarbonEnv.getCarbonTable(databaseNameOp, tableName)(sparkSession)
@@ -116,7 +115,6 @@ private[sql] case class CarbonProjectForUpdateCommand(
     var lockStatus = false
     // get the current time stamp which should be same for delete and update.
     val currentTime = CarbonUpdateUtil.readCurrentTime
-    //    var dataFrame: DataFrame = null
     var dataSet: DataFrame = null
     val isPersistEnabled = CarbonProperties.getInstance.isPersistUpdateDataset
     var hasHorizontalCompactionException = false
@@ -136,16 +134,29 @@ private[sql] case class CarbonProjectForUpdateCommand(
       if (updateLock.lockWithRetries()) {
         if (compactionLock.lockWithRetries()) {
           // Get RDD.
-          dataSet = if (isPersistEnabled) {
-            Dataset.ofRows(sparkSession, plan).persist(StorageLevel.fromString(
-              CarbonProperties.getInstance.getUpdateDatasetStorageLevel()))
+          dataSet = Dataset.ofRows(sparkSession, plan)
+
+          val accumulatorName = s"${carbonTable.getTableId}_${currentTime}_nonEmptyPart"
+          val nonEmptyPart = sparkSession.sparkContext.longAccumulator(accumulatorName)
+          dataSet.foreachPartition(partition =>
+            if (!partition.isEmpty) {
+              nonEmptyPart.add(1)
+            }
+          )
+          if(nonEmptyPart.value.toInt == 0) {
+            return Seq(Row(0L))
           }
-          else {
-            Dataset.ofRows(sparkSession, plan)
+          val filteredRdd = if (isPersistEnabled) {
+            dataSet.coalesce(nonEmptyPart.value.toInt).persist(
+              StorageLevel.fromString(CarbonProperties.getInstance()
+                .getUpdateDatasetStorageLevel()))
+          } else {
+            dataSet.coalesce(nonEmptyPart.value.toInt)
           }
+
           if (CarbonProperties.isUniqueValueCheckEnabled) {
             // If more than one value present for the update key, should fail the update
-            val ds = dataSet.select(CarbonCommonConstants.CARBON_IMPLICIT_COLUMN_TUPLEID)
+            val ds = filteredRdd.select(CarbonCommonConstants.CARBON_IMPLICIT_COLUMN_TUPLEID)
               .groupBy(CarbonCommonConstants.CARBON_IMPLICIT_COLUMN_TUPLEID)
               .count()
               .select("count")
@@ -162,12 +173,13 @@ private[sql] case class CarbonProjectForUpdateCommand(
             }
           }
 
+
           // do delete operation.
-          val (segmentsToBeDeleted, updatedRowCountTemp) = DeleteExecution.deleteDeltaExecution(
+          val (res, updatedRowCountTemp) = DeleteExecution.deleteDeltaExecution(
             databaseNameOp,
             tableName,
             sparkSession,
-            dataSet.rdd,
+            filteredRdd.rdd,
             currentTime + "",
             isUpdateOperation = true,
             executionErrors)
@@ -177,10 +189,13 @@ private[sql] case class CarbonProjectForUpdateCommand(
           }
 
           updatedRowCount = updatedRowCountTemp
+          if (updatedRowCount == 0) {
+            return Seq(Row(0L))
+          }
           updateTableModel =
-            UpdateTableModel(true, currentTime, executionErrors, segmentsToBeDeleted, Option.empty)
+            UpdateTableModel(true, currentTime, executionErrors, Seq.empty, Option.empty)
           // do update operation.
-          performUpdate(dataSet,
+          performUpdate(filteredRdd,
             databaseNameOp,
             tableName,
             plan,
@@ -188,9 +203,12 @@ private[sql] case class CarbonProjectForUpdateCommand(
             updateTableModel,
             executionErrors)
 
+          DeleteExecution.checkAndUpdateStatusFiles(executionErrors,
+            res, carbonTable, currentTime + "", true, updateTableModel)
+
           // pre-priming for update command
           DeleteExecution.reloadDistributedSegmentCache(carbonTable,
-            segmentsToBeDeleted, operationContext)(sparkSession)
+            Seq.empty, operationContext)(sparkSession)
 
         } else {
           throw new ConcurrentOperationException(carbonTable, "compaction", "update")
@@ -206,11 +224,13 @@ private[sql] case class CarbonProjectForUpdateCommand(
       HorizontalCompaction.tryHorizontalCompaction(
         sparkSession, carbonTable)
 
-      // Truncate materialized views on the current table.
-      val viewManager = MVManagerInSpark.get(sparkSession)
-      val viewSchemas = viewManager.getSchemasOnTable(carbonTable)
-      if (!viewSchemas.isEmpty) {
-        viewManager.onTruncate(viewSchemas)
+      if (CarbonProperties.getInstance().isMVEnabled) {
+        // Truncate materialized views on the current table.
+        val viewManager = MVManagerInSpark.get(sparkSession)
+        val viewSchemas = viewManager.getSchemasOnTable(carbonTable)
+        if (!viewSchemas.isEmpty) {
+          viewManager.onTruncate(viewSchemas)
+        }
       }
 
       // trigger event for Update table
@@ -238,11 +258,6 @@ private[sql] case class CarbonProjectForUpdateCommand(
     } finally {
       // In case of failure, clean new inserted segment,
       // change the status of new segment to 'mark for delete' from 'success'
-      if (hasUpdateException && null != updateTableModel
-        && updateTableModel.insertedSegment.isDefined) {
-        CarbonLoaderUtil.updateTableStatusInCaseOfFailure(updateTableModel.insertedSegment.get,
-          carbonTable, SegmentStatus.SUCCESS)
-      }
 
       if (updateLock.unlock()) {
         LOGGER.info(s"updateLock unlocked successfully after update $tableName")

@@ -997,7 +997,7 @@ public class SegmentFileStore {
       CarbonUpdateUtil.updateTableMetadataStatus(segmentSet, carbonTable, uniqueId,
           true, false,
           Segment.toSegmentList(toBeDeleteSegments, null),
-          Segment.toSegmentList(toBeUpdatedSegments, null), uuid);
+          Segment.toSegmentList(toBeUpdatedSegments, null), uuid, null);
     }
   }
 

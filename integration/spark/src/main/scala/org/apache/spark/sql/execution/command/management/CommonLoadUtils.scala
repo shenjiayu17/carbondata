@@ -23,7 +23,6 @@ import java.util
 import scala.collection.JavaConverters._
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
-
 import org.apache.commons.lang3.StringUtils
 import org.apache.hadoop.conf.Configuration
 import org.apache.spark.rdd.RDD
@@ -32,7 +31,7 @@ import org.apache.spark.sql.catalyst.{InternalRow, TableIdentifier}
 import org.apache.spark.sql.catalyst.analysis.{NoSuchTableException, UnresolvedAttribute}
 import org.apache.spark.sql.catalyst.catalog.CatalogTable
 import org.apache.spark.sql.catalyst.expressions.{Ascending, AttributeReference, SortOrder}
-import org.apache.spark.sql.catalyst.plans.logical.{LogicalPlan, Project}
+import org.apache.spark.sql.catalyst.plans.logical.{LocalRelation, LogicalPlan, Project}
 import org.apache.spark.sql.execution.LogicalRDD
 import org.apache.spark.sql.execution.command.UpdateTableModel
 import org.apache.spark.sql.execution.datasources.{CatalogFileIndex, FindDataSourceTable, HadoopFsRelation, LogicalRelation, SparkCarbonTableFormat}
@@ -42,7 +41,6 @@ import org.apache.spark.sql.util.SparkSQLUtil
 import org.apache.spark.storage.StorageLevel
 import org.apache.spark.unsafe.types.UTF8String
 import org.apache.spark.util.{CarbonReflectionUtils, CollectionAccumulator, SparkUtil}
-
 import org.apache.carbondata.common.{Maps, Strings}
 import org.apache.carbondata.common.logging.LogServiceFactory
 import org.apache.carbondata.converter.SparkDataTypeConverterImpl
@@ -862,6 +860,8 @@ object CommonLoadUtils {
     val table = loadParams.carbonLoadModel.getCarbonDataLoadSchema.getCarbonTable
     val catalogTable: CatalogTable = loadParams.logicalPartitionRelation.catalogTable.get
     CarbonUtils.threadSet("partition.operationcontext", loadParams.operationContext)
+    var newMetaEntry: Array[Row] = Array.empty
+    var opt: mutable.Map[String, String] = mutable.Map.empty
     val attributes = if (loadParams.scanResultRDD.isDefined) {
       // take the already re-arranged attributes
       catalogTable.schema.toAttributes
@@ -1021,7 +1021,7 @@ object CommonLoadUtils {
       } else if (loadParams.carbonLoadModel.getFactTimeStamp == 0L) {
         loadParams.carbonLoadModel.setFactTimeStamp(System.currentTimeMillis())
       }
-      val opt = collection.mutable.Map() ++ loadParams.optionsOriginal
+      opt = collection.mutable.Map() ++ loadParams.optionsOriginal
       if (loadParams.scanResultRDD.isDefined) {
         opt += ((DataLoadProcessorConstants.NO_REARRANGE_OF_ROWS, "true"))
       }
@@ -1047,7 +1047,17 @@ object CommonLoadUtils {
           overwrite = false,
           ifPartitionNotExists = false)
       SparkUtil.setNullExecutionId(loadParams.sparkSession)
-      Dataset.ofRows(loadParams.sparkSession, convertedPlan).collect()
+      val ds = Dataset.ofRows(loadParams.sparkSession, convertedPlan)
+      ds.collect()
+
+      if (!loadParams.updateModel.isEmpty && loadParams.updateModel.isDefined
+        && table.isHivePartitionTable) {
+        loadParams.updateModel.get.addedLoadDetail =
+          Some(ObjectSerializationUtil.convertStringToObject(
+            ds.logicalPlan
+              .asInstanceOf[LocalRelation].data(0).getString(0))
+            .asInstanceOf[LoadMetadataDetails])
+      }
     } catch {
       case ex: Throwable =>
         val (executorMessage, errorMessage) = CarbonScalaUtil.retrieveAndLogErrorMsg(ex, LOGGER)

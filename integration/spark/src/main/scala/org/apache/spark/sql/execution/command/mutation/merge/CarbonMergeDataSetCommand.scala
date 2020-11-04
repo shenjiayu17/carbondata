@@ -233,7 +233,7 @@ case class CarbonMergeDataSetCommand(
         carbonTable,
         trxMgr.getLatestTrx.toString,
         true,
-        true, new util.ArrayList[Segment]())
+        true, new util.ArrayList[Segment](), null)
     }
     LOGGER.info(s"Total inserted rows: ${stats.insertedRows.sum}")
     LOGGER.info(s"Total updated rows: ${stats.updatedRows.sum}")

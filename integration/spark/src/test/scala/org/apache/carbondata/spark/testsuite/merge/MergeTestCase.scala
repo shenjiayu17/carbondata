@@ -763,7 +763,7 @@ class MergeTestCase extends QueryTest with BeforeAndAfterAll {
       insertExpr(insertMap).
       whenMatched("B.deleted=true").
       delete().execute()
-    assert(getDeleteDeltaFileCount("target", "0") == 0)
+    assert(getDeleteDeltaFileCount("target", "0") == 3)
     checkAnswer(sql("select count(*) from target"), Seq(Row(3)))
     checkAnswer(sql("select * from target order by key"),
       Seq(Row("c", "200"), Row("d", "3"), Row("e", "100")))
@@ -868,7 +868,7 @@ class MergeTestCase extends QueryTest with BeforeAndAfterAll {
     target.as("A").merge(cdc.as("B"), "A.key=B.key").
       whenMatched("B.deleted=true").delete().execute()
 
-    assert(getDeleteDeltaFileCount("target", "0") == 1)
+    assert(getDeleteDeltaFileCount("target", "0") == 3)
     checkAnswer(sql("select count(*) from target"), Seq(Row(2)))
     checkAnswer(sql("select * from target order by key"), Seq(Row("a1", "0"), Row("d", "3")))
   }
@@ -929,7 +929,7 @@ class MergeTestCase extends QueryTest with BeforeAndAfterAll {
       odsframe,
       MergeDataSetMatches(col("A.id").equalTo(col("B.id")), matches.toList))
       .run(sqlContext.sparkSession)
-    assert(getDeleteDeltaFileCount("order", "0") == 2)
+    assert(getDeleteDeltaFileCount("order", "0") == 3)
     checkAnswer(sql("select count(*) from order where id like 'newid%'"), Seq(Row(2)))
     checkAnswer(sql("select count(*) from order"), Seq(Row(10)))
     checkAnswer(sql("select count(*) from order where state = 2"), Seq(Row(2)))
@@ -961,7 +961,7 @@ class MergeTestCase extends QueryTest with BeforeAndAfterAll {
       odsframe,
       MergeDataSetMatches((col("A.id").equalTo(col("B.id"))).and(col("A.quantity").equalTo(col(
         "B.quantity"))), matches.toList)).run(sqlContext.sparkSession)
-    assert(getDeleteDeltaFileCount("order", "0") == 1)
+    assert(getDeleteDeltaFileCount("order", "0") == 6)
     checkAnswer(sql("select count(*) from order where id like 'newid%'"), Seq(Row(2)))
     checkAnswer(sql("select count(*) from order"), Seq(Row(10)))
     checkAnswer(sql("select count(*) from order where state = 2"), Seq(Row(2)))

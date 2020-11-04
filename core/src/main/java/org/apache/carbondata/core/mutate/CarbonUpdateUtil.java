@@ -69,12 +69,31 @@ public class CarbonUpdateUtil {
   /**
    * returns required filed from tuple id
    *
+   */
+  public static String getRequiredFieldFromTID(String[] Tid, int index) {
+    return Tid[index];
+  }
+
+  /**
+   * returns required filed from tuple id
+   *
    * @param Tid
    * @param tid
    * @return
    */
   public static String getRequiredFieldFromTID(String Tid, TupleIdEnum tid) {
     return Tid.split("/")[tid.getTupleIdIndex()];
+  }
+
+  /**
+   * returns required filed from tuple id
+   *
+   * @param Tid
+   * @param tid
+   * @return
+   */
+  public static String getRequiredFieldFromTID(String[] Tid, TupleIdEnum tid) {
+    return Tid[tid.getTupleIdIndex()];
   }
 
   /**
@@ -105,6 +124,28 @@ public class CarbonUpdateUtil {
    * Returns block path from tuple id
    */
   public static String getTableBlockPath(String tid, String tablePath, boolean isStandardTable,
+      boolean isPartitionTable) {
+    String partField = "0";
+    // If it has segment file then part field can be appended directly to table path
+    if (!isStandardTable) {
+      if (isPartitionTable) {
+        partField = getRequiredFieldFromTID(tid, TupleIdEnum.PARTITION_PART_ID);
+        return tablePath + CarbonCommonConstants.FILE_SEPARATOR + partField.replace("#", "/");
+      } else {
+        return tablePath;
+      }
+    }
+    String part = CarbonTablePath.addPartPrefix(partField);
+    String segment =
+            CarbonTablePath.addSegmentPrefix(getRequiredFieldFromTID(tid, TupleIdEnum.SEGMENT_ID));
+    return CarbonTablePath.getFactDir(tablePath) + CarbonCommonConstants.FILE_SEPARATOR + part
+            + CarbonCommonConstants.FILE_SEPARATOR + segment;
+  }
+
+  /**
+   * Returns block path from tuple id
+   */
+  public static String getTableBlockPath(String[] tid, String tablePath, boolean isStandardTable,
       boolean isPartitionTable) {
     String partField = "0";
     // If it has segment file then part field can be appended directly to table path
@@ -238,10 +279,11 @@ public class CarbonUpdateUtil {
    */
   public static boolean updateTableMetadataStatus(Set<Segment> updatedSegmentsList,
       CarbonTable table, String updatedTimeStamp, boolean isTimestampUpdateRequired,
-      boolean isUpdateStatusFileUpdateRequired, List<Segment> segmentsToBeDeleted) {
+      boolean isUpdateStatusFileUpdateRequired, List<Segment> segmentsToBeDeleted,
+      LoadMetadataDetails newLoadEntry) throws IOException{
     return updateTableMetadataStatus(updatedSegmentsList, table, updatedTimeStamp,
         isTimestampUpdateRequired, isUpdateStatusFileUpdateRequired,
-        segmentsToBeDeleted, new ArrayList<Segment>(), "");
+        segmentsToBeDeleted, new ArrayList<Segment>(), "", newLoadEntry);
   }
 
   /**
@@ -256,7 +298,7 @@ public class CarbonUpdateUtil {
   public static boolean updateTableMetadataStatus(Set<Segment> updatedSegmentsList,
       CarbonTable table, String updatedTimeStamp, boolean isTimestampUpdateRequired,
       boolean isUpdateStatusFileUpdateRequired, List<Segment> segmentsToBeDeleted,
-      List<Segment> segmentFilesTobeUpdated, String uuid) {
+      List<Segment> segmentFilesTobeUpdated, String uuid, LoadMetadataDetails newLoadEntry) throws IOException{
 
     boolean status = false;
     String metaDataFilepath = table.getMetadataPath();
@@ -311,6 +353,28 @@ public class CarbonUpdateUtil {
               }
             }
           }
+        }
+
+        if (newLoadEntry != null) {
+          // existing entry needs to be overwritten as the entry will exist with some
+          // intermediate status
+          int indexToOverwriteNewMetaEntry = 0;
+          boolean found = false;
+          for (LoadMetadataDetails entry : listOfLoadFolderDetailsArray) {
+            if (entry.getLoadName().equals(newLoadEntry.getLoadName())
+                    && entry.getLoadStartTime() == newLoadEntry.getLoadStartTime()) {
+              newLoadEntry.setExtraInfo(entry.getExtraInfo());
+              found = true;
+              break;
+            }
+            indexToOverwriteNewMetaEntry++;
+          }
+          if (!found) {
+            LOGGER.error("Entry not found to update " + newLoadEntry + " From list :: "
+                    + listOfLoadFolderDetailsArray);
+            throw new IOException("Entry not found to update in the table status file");
+          }
+          listOfLoadFolderDetailsArray[indexToOverwriteNewMetaEntry] = newLoadEntry;
         }
 
         try {

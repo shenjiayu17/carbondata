@@ -18,9 +18,9 @@
 package org.apache.spark.sql.execution.command.mutation
 
 import java.util
+import java.util.stream.Collectors
 
 import scala.collection.JavaConverters._
-
 import org.apache.commons.lang3.StringUtils
 import org.apache.hadoop.fs.Path
 import org.apache.hadoop.mapred.JobConf
@@ -29,10 +29,9 @@ import org.apache.hadoop.mapreduce.lib.input.FileInputFormat
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{CarbonEnv, Row, SparkSession}
 import org.apache.spark.sql.catalyst.TableIdentifier
-import org.apache.spark.sql.execution.command.ExecutionErrors
+import org.apache.spark.sql.execution.command.{ExecutionErrors, UpdateTableModel}
 import org.apache.spark.sql.optimizer.CarbonFilters
 import org.apache.spark.sql.util.SparkSQLUtil
-
 import org.apache.carbondata.common.logging.LogServiceFactory
 import org.apache.carbondata.core.constants.CarbonCommonConstants
 import org.apache.carbondata.core.datastore.compression.CompressorFactory
@@ -64,27 +63,22 @@ object DeleteExecution {
       dataRdd: RDD[Row],
       timestamp: String,
       isUpdateOperation: Boolean,
-      executorErrors: ExecutionErrors): (Seq[Segment], Long) = {
+      executorErrors: ExecutionErrors):
+  (Array[List[(SegmentStatus, (SegmentUpdateDetails, ExecutionErrors, Long))]], Long) = {
 
     val (res, blockMappingVO) = deleteDeltaExecutionInternal(databaseNameOp,
       tableName, sparkSession, dataRdd, timestamp, isUpdateOperation, executorErrors)
-    var segmentsTobeDeleted = Seq.empty[Segment]
+
     var operatedRowCount = 0L
     // if no loads are present then no need to do anything.
     if (res.flatten.isEmpty) {
-      return (segmentsTobeDeleted, operatedRowCount)
+      return (res, operatedRowCount)
     }
-    val carbonTable = CarbonEnv.getCarbonTable(databaseNameOp, tableName)(sparkSession)
-    // update new status file
-    segmentsTobeDeleted =
-      checkAndUpdateStatusFiles(executorErrors,
-        res, carbonTable, timestamp,
-        blockMappingVO, isUpdateOperation)
 
     if (executorErrors.failureCauses == FailureCauses.NONE) {
       operatedRowCount = res.flatten.map(_._2._3).sum
     }
-    (segmentsTobeDeleted, operatedRowCount)
+    (res, operatedRowCount)
   }
 
   /**
@@ -136,7 +130,7 @@ object DeleteExecution {
           val key = CarbonUpdateUtil.getSegmentWithBlockFromTID(tupleId,
             carbonTable.isHivePartitionTable)
           (key, row)
-        }.groupByKey()
+        }
       case _ =>
         deleteRdd.map { row =>
           val tupleId: String = row
@@ -144,8 +138,13 @@ object DeleteExecution {
           val key = CarbonUpdateUtil.getSegmentWithBlockFromTID(tupleId,
             carbonTable.isHivePartitionTable)
           (key, row)
-        }.groupByKey()
+        }
     }
+
+    val rdd = keyRdd.aggregateByKey(List[Row]())(
+      (acc, x) => x :: acc,
+      (acc1, acc2) => acc1 ::: acc2
+    )
 
     // if no loads are present then no need to do anything.
     if (keyRdd.partitions.length == 0) {
@@ -166,28 +165,23 @@ object DeleteExecution {
     val metadataDetails = SegmentStatusManager.readTableStatusFile(
       CarbonTablePath.getTableStatusFilePath(carbonTable.getTablePath))
     val isStandardTable = CarbonUtil.isStandardCarbonTable(carbonTable)
-    val rowContRdd =
-      sparkSession.sparkContext.parallelize(
-        blockMappingVO.getCompleteBlockRowDetailVO.asScala.toSeq,
-        keyRdd.partitions.length)
 
     val conf = SparkSQLUtil
       .broadCastHadoopConf(sparkSession.sparkContext, sparkSession.sessionState.newHadoopConf())
-    val rdd = rowContRdd.join(keyRdd)
+
     val blockDetails = blockMappingVO.getBlockToSegmentMapping
     res = rdd.mapPartitionsWithIndex(
-      (index: Int, records: Iterator[((String), (RowCountDetailsVO, Iterable[Row]))]) =>
+      (index: Int, records: Iterator[((String), (Iterable[Row]))]) =>
         Iterator[List[(SegmentStatus, (SegmentUpdateDetails, ExecutionErrors, Long))]] {
           ThreadLocalSessionInfo.setConfigurationToCurrentThread(conf.value.value)
           var result = List[(SegmentStatus, (SegmentUpdateDetails, ExecutionErrors, Long))]()
           while (records.hasNext) {
-            val ((key), (rowCountDetailsVO, groupedRows)) = records.next
+            val ((key), (groupedRows)) = records.next
             result = result ++
                      deleteDeltaFunc(index,
                        key,
                        groupedRows.toIterator,
                        timestamp,
-                       rowCountDetailsVO,
                        isStandardTable,
                        metadataDetails
                          .find(_.getLoadName.equalsIgnoreCase(blockDetails.get(key)))
@@ -200,7 +194,6 @@ object DeleteExecution {
         key: String,
         iter: Iterator[Row],
         timestamp: String,
-        rowCountDetailsVO: RowCountDetailsVO,
         isStandardTable: Boolean,
         load: LoadMetadataDetails, carbonTable: CarbonTable
     ): Iterator[(SegmentStatus, (SegmentUpdateDetails, ExecutionErrors, Long))] = {
@@ -307,16 +300,8 @@ object DeleteExecution {
           segmentUpdateDetails.setDeleteDeltaEndTimestamp(timestamp)
           segmentUpdateDetails.setDeleteDeltaStartTimestamp(timestamp)
 
-          val alreadyDeletedRows: Long = rowCountDetailsVO.getDeletedRowsInBlock
-          val totalDeletedRows: Long = alreadyDeletedRows + countOfRows
-          segmentUpdateDetails.setDeletedRowsInBlock(totalDeletedRows.toString)
-          if (totalDeletedRows == rowCountDetailsVO.getTotalNumberOfRows) {
-            segmentUpdateDetails.setSegmentStatus(SegmentStatus.MARKED_FOR_DELETE)
-          }
-          else {
-            // write the delta file
-            carbonDeleteWriter.write(deleteDeltaBlockDetails)
-          }
+          // write the delta file
+          carbonDeleteWriter.write(deleteDeltaBlockDetails)
 
           deleteStatus = SegmentStatus.SUCCESS
         } catch {
@@ -359,8 +344,8 @@ object DeleteExecution {
       res: Array[List[(SegmentStatus, (SegmentUpdateDetails, ExecutionErrors, Long))]],
       carbonTable: CarbonTable,
       timestamp: String,
-      blockMappingVO: BlockMappingVO,
-      isUpdateOperation: Boolean): Seq[Segment] = {
+      isUpdateOperation: Boolean,
+      updateModel: UpdateTableModel): Unit = {
     val blockUpdateDetailsList = new util.ArrayList[SegmentUpdateDetails]()
     val segmentDetails = new util.HashSet[Segment]()
     res.foreach(resultOfSeg => resultOfSeg.foreach(
@@ -368,14 +353,7 @@ object DeleteExecution {
         if (resultOfBlock._1 == SegmentStatus.SUCCESS) {
           blockUpdateDetailsList.add(resultOfBlock._2._1)
           segmentDetails.add(new Segment(resultOfBlock._2._1.getSegmentName))
-          // if this block is invalid then decrement block count in map.
-          if (CarbonUpdateUtil.isBlockInvalid(resultOfBlock._2._1.getSegmentStatus)) {
-            CarbonUpdateUtil.decrementDeletedBlockCount(resultOfBlock._2._1,
-              blockMappingVO.getSegmentNumberOfBlockMapping)
-          }
         } else {
-          // In case of failure , clean all related delete delta files
-          CarbonUpdateUtil.cleanStaleDeltaFiles(carbonTable, timestamp)
           val errorMsg =
             "Delete data operation is failed due to failure in creating delete delta file for " +
             "segment : " + resultOfBlock._2._1.getSegmentName + " block : " +
@@ -392,22 +370,28 @@ object DeleteExecution {
         }
       }))
 
-    val listOfSegmentToBeMarkedDeleted = CarbonUpdateUtil
-      .getListOfSegmentsToMarkDeleted(blockMappingVO.getSegmentNumberOfBlockMapping)
-
-    val segmentsTobeDeleted = listOfSegmentToBeMarkedDeleted.asScala
+    val updateSegmentStatus = CarbonUpdateUtil
+      .updateSegmentStatus(blockUpdateDetailsList, carbonTable, timestamp, false)
+    val updateTableMetadataStatus = if (isUpdateOperation) {
+      CarbonUpdateUtil
+        .updateTableMetadataStatus(segmentDetails,
+          carbonTable,
+          timestamp,
+          true,
+          true,
+          new util.ArrayList[Segment](0), updateModel.addedLoadDetail.get)
+    } else {
+      CarbonUpdateUtil
+        .updateTableMetadataStatus(segmentDetails,
+          carbonTable,
+          timestamp,
+          true,
+          true,
+          new util.ArrayList[Segment](0), null)
+    }
 
     // this is delete flow so no need of putting timestamp in the status file.
-    if (CarbonUpdateUtil
-          .updateSegmentStatus(blockUpdateDetailsList, carbonTable, timestamp, false) &&
-        CarbonUpdateUtil
-          .updateTableMetadataStatus(segmentDetails,
-            carbonTable,
-            timestamp,
-            !isUpdateOperation,
-            !isUpdateOperation,
-            listOfSegmentToBeMarkedDeleted)
-    ) {
+    if (updateSegmentStatus && updateTableMetadataStatus) {
       LOGGER.info(s"Delete data operation is successful for " +
                   s"${ carbonTable.getDatabaseName }.${ carbonTable.getTableName }")
     } else {
@@ -419,7 +403,6 @@ object DeleteExecution {
       executorErrors.failureCauses = FailureCauses.STATUS_FILE_UPDATION_FAILURE
       executorErrors.errorMsg = errorMessage
     }
-    segmentsTobeDeleted
   }
 
   // all or none : update status file, only if complete delete operation is successful.

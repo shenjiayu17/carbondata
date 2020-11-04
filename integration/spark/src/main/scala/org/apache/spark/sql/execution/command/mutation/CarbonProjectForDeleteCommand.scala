@@ -109,7 +109,7 @@ private[sql] case class CarbonProjectForDeleteCommand(
       }
       val executorErrors = ExecutionErrors(FailureCauses.NONE, "")
 
-      val (deletedSegments, deletedRowCount) = DeleteExecution.deleteDeltaExecution(
+      val (res, deletedRowCount) = DeleteExecution.deleteDeltaExecution(
         databaseNameOp,
         tableName,
         sparkSession,
@@ -135,7 +135,10 @@ private[sql] case class CarbonProjectForDeleteCommand(
 
       // pre-priming for delete command
       DeleteExecution.reloadDistributedSegmentCache(carbonTable,
-        deletedSegments, operationContext)(sparkSession)
+        Seq.empty, operationContext)(sparkSession)
+
+      DeleteExecution.checkAndUpdateStatusFiles(executorErrors,
+        res, carbonTable, timestamp + "", false, null)
 
       // trigger post event for Delete from table
       val deleteFromTablePostEvent: DeleteFromTablePostEvent =
