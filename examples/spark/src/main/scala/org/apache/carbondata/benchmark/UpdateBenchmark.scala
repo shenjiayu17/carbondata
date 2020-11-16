@@ -43,7 +43,8 @@ object UpdateBenchmark {
       StructField("randLong", LongType, nullable = false),
       StructField("randDouble", DoubleType, nullable = false),
       StructField("randFloat", FloatType, nullable = false),
-      StructField("randString", StringType, nullable = false)
+      StructField("randString", StringType, nullable = false),
+      StructField("partitionColumn", IntegerType, nullable = false)
     )
   )
 
@@ -84,6 +85,12 @@ object UpdateBenchmark {
   }
 
   def createTable(spark: SparkSession): Unit = {
+
+    spark.sqlContext.sql(
+      s"""drop table if exists ${ToolProperties.dbName}.${ToolProperties.targetTableName}""")
+    spark.sqlContext.sql(
+      s"""drop table if exists ${ToolProperties.dbName}.${ToolProperties.changeTableName}""")
+
     val rowsPerTask = ToolProperties.rowCount / ToolProperties.loadParallelize
     val inputRDD = spark.sparkContext.parallelize(0 until ToolProperties.loadParallelize,
       ToolProperties.loadParallelize).flatMap { index =>
@@ -96,24 +103,38 @@ object UpdateBenchmark {
           UpdateDataGenerator.getNextDouble,
           UpdateDataGenerator.getNextFloat,
           UpdateDataGenerator.getNextString(ToolProperties.variableSize,
-            ToolProperties.affixRandom))
+            ToolProperties.affixRandom),
+          UpdateDataGenerator.getNextInt(ToolProperties.partitionNumber))
       }
       base
     }
     val df = spark.createDataFrame(inputRDD, schema)
-    df.write
-      .format(ToolProperties.format)
-      .option("dbName", ToolProperties.dbName)
-      .option("tableName", ToolProperties.targetTableName)
-      .mode(SaveMode.Overwrite)
-      .save()
-    df.sample(ToolProperties.updateRate)
-      .write
-      .option("dbName", ToolProperties.dbName)
-      .option("tableName", ToolProperties.changeTableName)
-      .format(ToolProperties.format)
-      .mode(SaveMode.Overwrite)
-      .save()
+    if (ToolProperties.partitionNumber <= 1) {
+      df.write
+        .format(ToolProperties.format)
+        .option("dbName", ToolProperties.dbName)
+        .option("tableName", ToolProperties.targetTableName)
+        .mode(SaveMode.Overwrite)
+        .save()
+    } else {
+      df.write
+        .format(ToolProperties.format)
+        .option("dbName", ToolProperties.dbName)
+        .option("tableName", ToolProperties.targetTableName)
+        .option("partitionColumns", "partitionColumn")
+        .mode(SaveMode.Overwrite)
+        .save()
+    }
+
+    if (ToolProperties.fixChangeData) {
+      df.sample(ToolProperties.updateRate)
+        .write
+        .option("dbName", ToolProperties.dbName)
+        .option("tableName", ToolProperties.changeTableName)
+        .format(ToolProperties.format)
+        .mode(SaveMode.Overwrite)
+        .save()
+    }
   }
 
   def updateTable(spark: SparkSession): Unit = {
@@ -237,6 +258,21 @@ class Updater (private val spark: SparkSession) extends Thread{
 
   override def run(): Unit = {
     for (i <- 0 until ToolProperties.updateTimes) {
+
+      if (!ToolProperties.fixChangeData) {
+        spark.sqlContext.sql(
+          s"""drop table if exists ${ToolProperties.dbName}.${ToolProperties.changeTableName}""")
+        val targetDataFrame = spark.sqlContext.sql(
+          s"""select * from ${ToolProperties.dbName}.${ToolProperties.targetTableName}""")
+        targetDataFrame.sample(ToolProperties.updateRate)
+          .write
+          .option("dbName", ToolProperties.dbName)
+          .option("tableName", ToolProperties.changeTableName)
+          .format(ToolProperties.format)
+          .mode(SaveMode.Overwrite)
+          .save()
+      }
+
       val start = System.currentTimeMillis();
       try {
         spark.sqlContext.sql(
@@ -347,6 +383,9 @@ object ToolProperties {
   val dbName = getConf("DB_NAME", "default");
   val format = getConf("FORMAT", "carbondata")
   var runMode = getConf("runMode", "local")
+  var fixChangeData = getConf("FIX_CHANGE_DATA", true)
+  var partitionNumber = getConf("PARTITION_NUMBER", 1)
+  partitionNumber = if (partitionNumber <= 1) 1 else partitionNumber
 
   def getConf(property: String, defaultValue: Int): Int = {
     val value = properties.getProperty(property)
@@ -360,7 +399,7 @@ object ToolProperties {
   def getConf(property: String, defaultValue: Boolean): Boolean = {
     val value = properties.getProperty(property)
     if (value != null && !value.isEmpty) {
-      Boolean.unbox(value)
+      value.toBoolean
     } else {
       defaultValue
     }

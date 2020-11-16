@@ -299,6 +299,7 @@ object DeleteExecution {
           segmentUpdateDetails.setSegmentName(load.getLoadName)
           segmentUpdateDetails.setDeleteDeltaEndTimestamp(timestamp)
           segmentUpdateDetails.setDeleteDeltaStartTimestamp(timestamp)
+          segmentUpdateDetails.setDeletedRowsInBlock(null)
 
           // write the delta file
           carbonDeleteWriter.write(deleteDeltaBlockDetails)

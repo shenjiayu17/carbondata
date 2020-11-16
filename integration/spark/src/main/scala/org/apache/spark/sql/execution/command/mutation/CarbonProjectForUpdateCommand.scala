@@ -194,8 +194,12 @@ private[sql] case class CarbonProjectForUpdateCommand(
           }
           updateTableModel =
             UpdateTableModel(true, currentTime, executionErrors, Seq.empty, Option.empty)
+          // coalesce rdd partitions to reduce carbondata files added in once update
+          val rowCountForCoalesce = CarbonCommonConstants.CARBON_UPDATE_ROW_COUNT_FOR_COALESCE
+          val coalesceRdd =
+            filteredRdd.coalesce(Math.ceil(updatedRowCount.toDouble / rowCountForCoalesce).toInt)
           // do update operation.
-          performUpdate(filteredRdd,
+          performUpdate(coalesceRdd,
             databaseNameOp,
             tableName,
             plan,
